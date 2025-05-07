@@ -1,0 +1,2 @@
+#LWP-Cookies-2.0
+Set-Cookie3: JSESSIONID="dqIzB64Y56fq156vpqHJhGczhe5uim3ES8qlOp0H.col-azu-p-paw01"; path="/online-applications"; domain="www.planning2.cityoflondon.gov.uk"; path_spec; secure; discard; HttpOnly=None; SameSite=None; version=0

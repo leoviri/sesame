@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>City of London Planning Scraper</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        h1 {
+            color: #2c3e50;
+            margin-bottom: 20px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        select, button {
+            padding: 8px 12px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+        }
+        select {
+            width: 100%;
+            max-width: 300px;
+        }
+        button {
+            background-color: #3498db;
+            color: white;
+            border: none;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+        button:hover {
+            background-color: #2980b9;
+        }
+        #status {
+            margin-top: 20px;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .loading {
+            background-color: #f8f9fa;
+            border-left: 4px solid #6c757d;
+        }
+        .success {
+            background-color: #d4edda;
+            border-left: 4px solid #28a745;
+        }
+        .error {
+            background-color: #f8d7da;
+            border-left: 4px solid #dc3545;
+        }
+        #results {
+            margin-top: 20px;
+            overflow-x: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            text-align: left;
+            padding: 8px;
+            border-bottom: 1px solid #ddd;
+        }
+        th {
+            background-color: #f2f2f2;
+        }
+        .hidden {
+            display: none;
+        }
+        .info {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+        .button-group {
+            display: flex;
+            gap: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>City of London Planning Scraper</h1>
+    
+    <div class="info">
+        <p>This tool allows you to scrape planning application data from the City of London planning portal. Select your parameters below:</p>
+        <p><strong>Note:</strong> To prevent timeouts, the API limits results to a maximum of 2 months and 3 wards per request.</p>
+    </div>
+    
+    <div class="form-group">
+        <label for="startMonth">Start Month:</label>
+        <select id="startMonth"></select>
+    </div>
+    
+    <div class="form-group">
+        <label for="endMonth">End Month:</label>
+        <select id="endMonth"></select>
+    </div>
+    
+    <div class="form-group">
+        <label for="wards">Select Wards:</label>
+        <select id="wards" multiple size="5"></select>
+        <p><small>Hold Ctrl/Cmd to select multiple wards</small></p>
+    </div>
+    
+    <div class="form-group">
+        <label for="format">Output Format:</label>
+        <select id="format">
+            <option value="json">JSON (view in browser)</option>
+            <option value="csv">CSV (download file)</option>
+        </select>
+    </div>
+    
+    <div class="button-group">
+        <button id="scrapeButton">Start Scraping</button>
+        <button id="downloadButton" class="hidden">Download CSV</button>
+    </div>
+    
+    <div id="status" class="hidden"></div>
+    
+    <div id="results" class="hidden">
+        <h2>Results</h2>
+        <div id="resultSummary"></div>
+        <table id="resultTable">
+            <thead>
+                <tr>
+                    <th>Address</th>
+                    <th>Name</th>
+                    <th>Email</th>
+                </tr>
+            </thead>
+            <tbody id="resultBody"></tbody>
+        </table>
+    </div>
+
+    <script>
+        // Global variables
+        let csvData = null;
+        
+        // Helper function to show status messages
+        function showStatus(message, type) {
+            const status = document.getElementById('status');
+            status.textContent = message;
+            status.className = type;
+            status.classList.remove('hidden');
+        }
+        
+        // Function to load available months
+        async function loadMonths() {
+            try {
+                showStatus('Loading available months...', 'loading');
+                const response = await fetch('/api/months');
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error ${response.status}`);
+                }
+                
+                const months = await response.json();
+                
+                const startMonthSelect = document.getElementById('startMonth');
+                const endMonthSelect = document.getElementById('endMonth');
+                
+                // Clear existing options
+                startMonthSelect.innerHTML = '';
+                endMonthSelect.innerHTML = '';
+                
+                // Add months to selects
+                months.forEach(month => {
+                    const startOption = document.createElement('option');
+                    startOption.value = month;
+                    startOption.textContent = month;
+                    startMonthSelect.appendChild(startOption);
+                    
+                    const endOption = document.createElement('option');
+                    endOption.value = month;
+                    endOption.textContent = month;
+                    endMonthSelect.appendChild(endOption);
+                });
+                
+                // Set default selections (most recent month)
+                if (months.length > 0) {
+                    startMonthSelect.value = months[0];
+                    endMonthSelect.value = months[0];
+                }
+                
+                document.getElementById('status').classList.add('hidden');
+            } catch (error) {
+                showStatus(`Error loading months: ${error.message}`, 'error');
+            }
+        }
+        
+        // Function to load available wards
+        async function loadWards() {
+            try {
+                showStatus('Loading wards...', 'loading');
+                const response = await fetch('/api/wards');
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error ${response.status}`);
+                }
+                
+                const wards = await response.json();
+                
+                const wardsSelect = document.getElementById('wards');
+                
+                // Clear existing options
+                wardsSelect.innerHTML = '';
+                
+                // Add wards to select
+                wards.forEach(ward => {
+                    const option = document.createElement('option');
+                    option.value = ward.value;
+                    option.textContent = ward.name;
+                    wardsSelect.appendChild(option);
+                });
+                
+                document.getElementById('status').classList.add('hidden');
+            } catch (error) {
+                showStatus(`Error loading wards: ${error.message}`, 'error');
+            }
+        }
+        
+        // Function to start scraping
+        async function startScraping() {
+            try {
+                const startMonth = document.getElementById('startMonth').value;
+                const endMonth = document.getElementById('endMonth').value;
+                const format = document.getElementById('format').value;
+                
+                // Get selected wards
+                const wardsSelect = document.getElementById('wards');
+                const selectedWards = Array.from(wardsSelect.selectedOptions).map(option => option.value);
+                
+                if (selectedWards.length === 0) {
+                    showStatus('Please select at least one ward', 'error');
+                    return;
+                }
+                
+                showStatus('Scraping data... This may take a few minutes.', 'loading');
+                
+                // Hide results section while loading
+                document.getElementById('results').classList.add('hidden');
+                document.getElementById('downloadButton').classList.add('hidden');
+                
+                // Prepare request payload
+                const payload = {
+                    start_month: startMonth,
+                    end_month: endMonth,
+                    selected_wards: selectedWards,
+                    format: format
+                };
+                
+                // Make API request
+                const response = await fetch('/api/scrape', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(payload)
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error ${response.status}`);
+                }
+                
+                // Handle response based on format
+                if (format === 'csv') {
+                    // For CSV, get text response and prepare download
+                    csvData = await response.text();
+                    document.getElementById('downloadButton').classList.remove('hidden');
+                    showStatus('Scraping completed! Click "Download CSV" to save the data.', 'success');
+                } else {
+                    // For JSON, display results in table
+                    const data = await response.json();
+                    displayResults(data);
+                    showStatus(`Scraping completed! Found ${data.count} results.`, 'success');
+                }
+                
+            } catch (error) {
+                showStatus(`Error during scraping: ${error.message}`, 'error');
+            }
+        }
+        
+        // Function to display results in table
+        function displayResults(data) {
+            const results = document.getElementById('results');
+            const resultSummary = document.getElementById('resultSummary');
+            const resultBody = document.getElementById('resultBody');
+            
+            // Clear existing results
+            resultBody.innerHTML = '';
+            
+            // Show results section
+            results.classList.remove('hidden');
+            
+            // Display summary
+            resultSummary.textContent = `Found ${data.count} results from ${data.months.join(', ')} for wards: ${data.wards.join(', ')}`;
+            
+            // Add rows to table
+            data.data.forEach(item => {
+                const row = document.createElement('tr');
+                
+                const addressCell = document.createElement('td');
+                addressCell.textContent = item.address;
+                row.appendChild(addressCell);
+                
+                const nameCell = document.createElement('td');
+                nameCell.textContent = item.name || '-';
+                row.appendChild(nameCell);
+                
+                const emailCell = document.createElement('td');
+                emailCell.textContent = item.email || '-';
+                row.appendChild(emailCell);
+                
+                resultBody.appendChild(row);
+            });
+        }
+        
+        // Function to download CSV
+        function downloadCSV() {
+            if (!csvData) return;
+            
+            const blob = new Blob([csvData], { type: 'text/csv' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.style.display = 'none';
+            a.href = url;
+            a.download = 'cityoflondon_planning_data.csv';
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+        }
+        
+        // Initialize the page
+        document.addEventListener('DOMContentLoaded', () => {
+            // Load initial data
+            loadMonths();
+            loadWards();
+            
+            // Set up event listeners
+            document.getElementById('scrapeButton').addEventListener('click', startScraping);
+            document.getElementById('downloadButton').addEventListener('click', downloadCSV);
+        });
+    </script>
+</body>
+</html> 
