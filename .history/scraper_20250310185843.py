@@ -3,33 +3,34 @@ import http.cookiejar
 import re
 import csv
 import time
-import os
 from datetime import datetime, timedelta
-from io import StringIO
 
-# Define the CSV file name (using relative path or memory storage for serverless deployment)
-CSV_MEMORY = StringIO()  # In-memory storage for CSV data
+# Define the CSV file name as a global variable
+CSV_FILE_NAME = "C:\Sesame\scraper_www.planning2.cityoflondon.gov.uk\cityoflondon.csv"
 
 # Delay between fetching pages
-DELAY = 5  # Reduced for API usage
+DELAY = 30
 
 # Retry configuration
-RETRY_COUNT = 3  # Reduced for API usage
-RETRY_DELAY = 10  # Reduced for API usage
+RETRY_COUNT = 50  # Number of retries
+RETRY_DELAY = 100  # Delay between retries (seconds)
 
 # Define START_MONTH
 # None for Default to last month
-START_MONTH = None  # Example: "Jan 24"
+START_MONTH = "Jan 25"  # Example: "Jan 24"
 
 # Define END_MONTH
 # None for Default to the current month
 END_MONTH = None  # Example: "Mar 24"
 
-# For scraping in a descending order
+# For scraping in an ascending order
 DIRECTION = -1
+# For scraping in a descending order
+# DIRECTION = -1
 
-# File to store cookies (use temp storage for serverless)
-COOKIE_FILE = "/tmp/cookies.txt" if os.path.exists("/tmp") else "cookies.txt"
+
+# File to store cookies
+COOKIE_FILE = "cookies.txt"
 
 def load_cookies(cookie_file):
     """Load cookies from a file."""
@@ -42,10 +43,7 @@ def load_cookies(cookie_file):
 
 def save_cookies(cookie_jar, cookie_file):
     """Save cookies to a file."""
-    try:
-        cookie_jar.save(cookie_file, ignore_discard=True, ignore_expires=True)
-    except Exception as e:
-        print(f"Warning: Could not save cookies: {e}")
+    cookie_jar.save(cookie_file, ignore_discard=True, ignore_expires=True)
 
 def get_search_page():
     url = "https://www.planning2.cityoflondon.gov.uk/online-applications/search.do?action=simple&searchType=Application"
@@ -79,6 +77,7 @@ def get_search_page():
                 break  # Exit the loop on success
             else:
                 print(f"HTTP error: {response.status_code}. Retrying {attempt + 1}/{RETRY_COUNT}...")
+                #print(response.text)
                 time.sleep(RETRY_DELAY)  # Wait before retrying
         except (requests.ConnectionError, requests.Timeout) as e:
             print(f"Connection error: {e}. Retrying {attempt + 1}/{RETRY_COUNT}...")
@@ -134,6 +133,8 @@ def get_first_page(csrf, search_month, _ward):
     session = requests.Session()
     session.cookies = cookie_jar
     
+    #print(payload)
+    
     response = None  # Initialize response variable
     for attempt in range(RETRY_COUNT):
         try:
@@ -166,6 +167,14 @@ def get_first_page(csrf, search_month, _ward):
 def parse_page(page_content):
     """
     Parse the HTML page content to extract the next page number and list of records.
+
+    Args:
+        page_content (str): HTML content of the page.
+
+    Returns:
+        tuple: A tuple containing:
+            - next_page_number (int or None): The number of the next page if available, otherwise None.
+            - records (list): A list of dictionaries with keys 'keyVal' and 'address'.
     """
     # Extract the next page number
     next_page_match = re.search(r'searchCriteria.page=([\d]+)" class="next"', page_content)
@@ -191,6 +200,12 @@ def parse_page(page_content):
 def get_next_page(next_page_number):
     """
     Fetch the content of the specified next page.
+
+    Args:
+        next_page_number (int): The page number to retrieve.
+
+    Returns:
+        str: The HTML content of the specified page.
     """
     url = f"https://www.planning2.cityoflondon.gov.uk/online-applications/pagedSearchResults.do?action=page&searchCriteria.page={next_page_number}"
     headers = {
@@ -244,6 +259,12 @@ def get_next_page(next_page_number):
 def get_contact_details(keyVal):
     """
     Fetch and parse the contact details for the given keyVal.
+
+    Args:
+        keyVal (str): The unique key value of the application.
+
+    Returns:
+        dict: A dictionary containing 'name' and 'email', or None if not found.
     """
     url = f"https://www.planning2.cityoflondon.gov.uk/online-applications/applicationDetails.do?activeTab=contacts&keyVal={keyVal}"
     headers = {
@@ -298,23 +319,37 @@ def get_contact_details(keyVal):
     email = contact_match.group(2).strip() if contact_match else None
     
     if name:
+        #print(name)
         name = re.sub(r'^\b(Mr|Mrs|Ms|Miss|Dr)\b\.?\s*', '', name, flags=re.IGNORECASE)
 
     return {'name': name, 'email': email}
 
 def save_line(address, name, email):
     """
-    Append a row with address, name, and email to the in-memory CSV.
+    Append a row with address, name, and email to the specified CSV file.
+
+    Args:
+        address (str): The address value.
+        name (str): The name value.
+        email (str): The email value.
     """
     # Check if email is valid (not empty and does not end with '.gov')
     if email and not email.endswith(".gov") and "tree" not in email.lower():
-        # In-memory CSV handling
-        writer = csv.writer(CSV_MEMORY)
-        writer.writerow([address, name, email])
+        with open(CSV_FILE_NAME, mode='a', newline='', encoding='utf-8') as file:
+            writer = csv.writer(file)
+            writer.writerow([address, name, email])  # Write as a single row
 
 def get_month_list(start_month=None, end_month=None):
     """
-    Returns a list of months in "Mon YY" format
+    Returns a list of months in "Mon YY" format, either for the last month and current month
+    or from the specified start month to the end month, in the order defined by DIRECTION.
+
+    Args:
+        start_month (str, optional): The starting month in "Mon YY" format (e.g., "Jan 23").
+        end_month (str, optional): The ending month in "Mon YY" format (e.g., "Mar 23").
+
+    Returns:
+        list: List of months in "Mon YY" format, ordered based on DIRECTION.
     """
     now = datetime.now()
 
@@ -350,7 +385,11 @@ def get_month_list(start_month=None, end_month=None):
 
 def get_ward_list():
     """
-    Fetches the list of wards from the given URL
+    Fetches the list of wards from the given URL, parsing the <select> tag with id="ward" 
+    and extracting the values and names of <option> elements.
+
+    Returns:
+        list: A list of dictionaries containing ward 'value' and 'name'.
     """
     url = 'https://www.planning2.cityoflondon.gov.uk/online-applications/search.do?action=monthlyList'
     headers = {
@@ -404,110 +443,59 @@ def get_ward_list():
 
     return ward_list
 
-def scrape_data(start_month=None, end_month=None, selected_wards=None):
-    """
-    Main function to scrape data and return results.
-    Returns both a list of data and CSV formatted data.
-    """
-    try:
-        global CSV_MEMORY
-        CSV_MEMORY = StringIO()  # Reset the in-memory CSV
-        
-        all_results = []
-        
-        # Init CSV header
-        writer = csv.writer(CSV_MEMORY)
-        writer.writerow(["Address", "Name", "Email"])
-        
-        csrf_token = get_search_page()  # Get CSRF token first
-        month_list = get_month_list(start_month, end_month)
-        
-        # Get all wards or filter by selected wards
-        all_wards = get_ward_list()
-        if selected_wards:
-            wards = [ward for ward in all_wards if ward['value'] in selected_wards]
-        else:
-            wards = all_wards
-            
-        # Limit the scope to prevent timeouts in serverless functions
-        if len(month_list) > 2:
-            month_list = month_list[:2]
-        if len(wards) > 3:
-            wards = wards[:3]
-            
-        for search_month_keyword in month_list:
-            for ward in wards:
-                first_page_content = get_first_page(csrf_token, search_month_keyword, ward['value'])
-                next_page, records = parse_page(first_page_content)
-                
-                # Process first page records
-                for record in records:
-                    time.sleep(DELAY)
-                    contact_details = get_contact_details(record['keyVal'])
-                    
-                    # Only include valid data
-                    if contact_details['email'] and not contact_details['email'].endswith(".gov") and "tree" not in contact_details['email'].lower():
-                        result = {
-                            'address': record['address'],
-                            'name': contact_details['name'],
-                            'email': contact_details['email']
-                        }
-                        all_results.append(result)
-                        save_line(record['address'], contact_details['name'], contact_details['email'])
 
-                # Process additional pages if they exist
-                while next_page is not None:
-                    next_page_content = get_next_page(next_page)            
-                    next_page, records = parse_page(next_page_content)
-                    
-                    for record in records:
-                        time.sleep(DELAY)
-                        contact_details = get_contact_details(record['keyVal'])
-                        
-                        # Only include valid data
-                        if contact_details['email'] and not contact_details['email'].endswith(".gov") and "tree" not in contact_details['email'].lower():
-                            result = {
-                                'address': record['address'],
-                                'name': contact_details['name'],
-                                'email': contact_details['email']
-                            }
-                            all_results.append(result)
-                            save_line(record['address'], contact_details['name'], contact_details['email'])
-        
-        # Get the CSV data as string
-        csv_data = CSV_MEMORY.getvalue()
-        
-        return {
-            'data': all_results,
-            'csv': csv_data,
-            'count': len(all_results),
-            'months': month_list,
-            'wards': [w['name'] for w in wards]
-        }
-                
-    except Exception as e:
-        print(f"Error in scraping: {e}")
-        return {
-            'error': str(e),
-            'data': [],
-            'csv': '',
-            'count': 0,
-            'months': [],
-            'wards': []
-        }
 
 def main():
-    # This function is kept for backward compatibility
-    # For the API version, use scrape_data() function
-    results = scrape_data()
-    
-    # If you want to save results to a local file when running as a script
-    if results['count'] > 0:
-        with open("cityoflondon_data.csv", "w", newline='', encoding='utf-8') as f:
-            f.write(results['csv'])
-        print(f"Scraping completed successfully with {results['count']} records")
-    else:
-        print("Scraping completed with no results or with errors")
+    try:
+        csrf_token = get_search_page()  # Get CSRF token first
+        save_line("Address","Name","Email")
+        month_list = get_month_list()
+        ward_list = get_ward_list()
+        current_month = 1
+        for search_month_keyword in get_month_list():
+            current_ward = 1
+            for ward in ward_list:
+                current_page = 1
+                first_page_content = get_first_page(csrf_token, search_month_keyword, ward['value'])
+                next_page, records = parse_page(first_page_content)
+                print(f"Searching month: {search_month_keyword}")
+                print(f"Searching ward: {ward['name']}")
+                print(f"Page: {current_page}, Records: {len(records)}")
+                current_record = 1
+                for record in records:
+                    print(f"Status, Record: {current_record}/{len(records)}, Page: {current_page}, Ward: '{ward['name']}' {current_ward}/{len(ward_list)}, Month: '{search_month_keyword}' {current_month}/{len(month_list)}\r", end="", flush=True)
+                    time.sleep(DELAY)
+                    contact_details = get_contact_details(record['keyVal'])
+                    print(" " * 80, end="\r", flush=True)  # Clears the line with spaces
+                    print(contact_details)
+                    print(f"Address: {record['address']}\n")
+                    save_line(record['address'], contact_details['name'], contact_details['email'])
+                    
+                    current_record += 1
+
+                while next_page is not None:
+                    current_page += 1
+                    next_page_content = get_next_page(next_page)            
+                    next_page, records = parse_page(next_page_content)
+                    print(f"Page: {current_page}, Records: {len(records)}")
+                    for record in records:
+                        print(f"Status, Record: {current_record}/{len(records)}, Page: {current_page}, Ward: '{ward['name']}' {current_ward}/{len(ward_list)}, Month: '{search_month_keyword}' {current_month}/{len(month_list)}\r", end="", flush=True)
+                        time.sleep(DELAY)
+                        contact_details = get_contact_details(record['keyVal'])
+                        print(" " * 80, end="\r", flush=True)  # Clears the line with spaces
+                        print(contact_details)
+                        print(f"Address: {record['address']}\n")
+                        save_line(record['address'], contact_details['name'], contact_details['email'])
+                
+                        current_record += 1
+                    #current_page += 1
+                current_ward += 1
+            current_month += 1
+                
+    except Exception as e:
+        print(e)
+        
+    print("Scraping completed successfully")
 
 if __name__ == "__main__":
     main()

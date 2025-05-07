@@ -1,14 +1,17 @@
+from http.server import BaseHTTPRequestHandler
 import requests
 import http.cookiejar
 import re
 import csv
 import time
+import json
 import os
 from datetime import datetime, timedelta
 from io import StringIO
+import concurrent.futures
 
-# Define the CSV file name (using relative path or memory storage for serverless deployment)
-CSV_MEMORY = StringIO()  # In-memory storage for CSV data
+# Define the storage location (temporary for Vercel functions)
+COOKIE_CONTENT = ""
 
 # Delay between fetching pages
 DELAY = 5  # Reduced for API usage
@@ -17,35 +20,35 @@ DELAY = 5  # Reduced for API usage
 RETRY_COUNT = 3  # Reduced for API usage
 RETRY_DELAY = 10  # Reduced for API usage
 
-# Define START_MONTH
-# None for Default to last month
-START_MONTH = None  # Example: "Jan 24"
+# Direction 
+DIRECTION = -1  # For scraping in a descending order
 
-# Define END_MONTH
-# None for Default to the current month
-END_MONTH = None  # Example: "Mar 24"
-
-# For scraping in a descending order
-DIRECTION = -1
-
-# File to store cookies (use temp storage for serverless)
-COOKIE_FILE = "/tmp/cookies.txt" if os.path.exists("/tmp") else "cookies.txt"
-
-def load_cookies(cookie_file):
-    """Load cookies from a file."""
+def load_cookies():
+    """Load cookies from memory."""
+    global COOKIE_CONTENT
     cookie_jar = http.cookiejar.LWPCookieJar()
-    try:
-        cookie_jar.load(cookie_file, ignore_discard=True, ignore_expires=True)
-    except FileNotFoundError:
-        pass  # No cookies file found, starting fresh
+    if COOKIE_CONTENT:
+        try:
+            temp_file = "/tmp/cookies.txt"
+            with open(temp_file, "w") as f:
+                f.write(COOKIE_CONTENT)
+            cookie_jar.load(temp_file, ignore_discard=True, ignore_expires=True)
+            os.remove(temp_file)
+        except Exception as e:
+            print(f"Cookie loading error: {e}")
     return cookie_jar
 
-def save_cookies(cookie_jar, cookie_file):
-    """Save cookies to a file."""
+def save_cookies(cookie_jar):
+    """Save cookies to memory."""
+    global COOKIE_CONTENT
+    temp_file = "/tmp/cookies.txt"
     try:
-        cookie_jar.save(cookie_file, ignore_discard=True, ignore_expires=True)
+        cookie_jar.save(temp_file, ignore_discard=True, ignore_expires=True)
+        with open(temp_file, "r") as f:
+            COOKIE_CONTENT = f.read()
+        os.remove(temp_file)
     except Exception as e:
-        print(f"Warning: Could not save cookies: {e}")
+        print(f"Cookie saving error: {e}")
 
 def get_search_page():
     url = "https://www.planning2.cityoflondon.gov.uk/online-applications/search.do?action=simple&searchType=Application"
@@ -56,7 +59,6 @@ def get_search_page():
         "Accept-Encoding": "gzip, deflate, br",
         "DNT": "1",
         "Connection": "keep-alive",
-        "Referer": "https://www.planning2.cityoflondon.gov.uk/online-applications/timeout.do",
         "Upgrade-Insecure-Requests": "1",
         "Sec-Fetch-Dest": "document",
         "Sec-Fetch-Mode": "navigate",
@@ -64,7 +66,7 @@ def get_search_page():
     }
     
     # Load cookies and create a session
-    cookie_jar = load_cookies(COOKIE_FILE)
+    cookie_jar = load_cookies()
     session = requests.Session()
     session.cookies = cookie_jar
 
@@ -89,7 +91,7 @@ def get_search_page():
         raise RuntimeError(f"Failed to fetch {url} after {RETRY_COUNT} attempts.")
 
     # Save cookies after the request
-    save_cookies(cookie_jar, COOKIE_FILE)
+    save_cookies(cookie_jar)
 
     # Check for a successful request
     if response.status_code == 200:
@@ -130,7 +132,7 @@ def get_first_page(csrf, search_month, _ward):
     }
     
     # Create a session to manage cookies
-    cookie_jar = load_cookies(COOKIE_FILE)
+    cookie_jar = load_cookies()
     session = requests.Session()
     session.cookies = cookie_jar
     
@@ -155,7 +157,7 @@ def get_first_page(csrf, search_month, _ward):
         raise RuntimeError(f"Failed to fetch {url} after {RETRY_COUNT} attempts.")
 
     # Save cookies after the request
-    save_cookies(cookie_jar, COOKIE_FILE)
+    save_cookies(cookie_jar)
 
     # Check for a successful request
     if response.status_code == 200:
@@ -208,7 +210,7 @@ def get_next_page(next_page_number):
     }
 
     # Create a session to manage cookies
-    cookie_jar = load_cookies(COOKIE_FILE)
+    cookie_jar = load_cookies()
     session = requests.Session()
     session.cookies = cookie_jar
 
@@ -233,7 +235,7 @@ def get_next_page(next_page_number):
         raise RuntimeError(f"Failed to fetch {url} after {RETRY_COUNT} attempts.")
 
     # Save cookies after the request
-    save_cookies(cookie_jar, COOKIE_FILE)
+    save_cookies(cookie_jar)
 
     # Check for a successful request
     if response.status_code == 200:
@@ -302,38 +304,24 @@ def get_contact_details(keyVal):
 
     return {'name': name, 'email': email}
 
-def save_line(address, name, email):
-    """
-    Append a row with address, name, and email to the in-memory CSV.
-    """
-    # Check if email is valid (not empty and does not end with '.gov')
-    if email and not email.endswith(".gov") and "tree" not in email.lower():
-        # In-memory CSV handling
-        writer = csv.writer(CSV_MEMORY)
-        writer.writerow([address, name, email])
-
 def get_month_list(start_month=None, end_month=None):
     """
     Returns a list of months in "Mon YY" format
     """
     now = datetime.now()
-
-    # Determine the start month
-    start_month = start_month or START_MONTH
-    if start_month:
-        start_date = datetime.strptime(start_month, "%b %y")
-    else:
-        # Default to last month
+    
+    # Default to last month if no start month is provided
+    if not start_month:
         start_date = now.replace(day=1) - timedelta(days=1)
         start_date = start_date.replace(day=1)
-
-    # Determine the end month
-    end_month = end_month or END_MONTH
-    if end_month:
-        end_date = datetime.strptime(end_month, "%b %y")
     else:
-        # Default to current month
+        start_date = datetime.strptime(start_month, "%b %y")
+
+    # Default to current month if no end month is provided
+    if not end_month:
         end_date = now.replace(day=1)
+    else:
+        end_date = datetime.strptime(end_month, "%b %y")
 
     # Swap months if the range is reversed
     if (start_date > end_date):
@@ -363,8 +351,8 @@ def get_ward_list():
         'Upgrade-Insecure-Requests': '1',
     }
 
-    # Load cookies from the file
-    cookie_jar = load_cookies(COOKIE_FILE)
+    # Load cookies from memory
+    cookie_jar = load_cookies()
     session = requests.Session()
     session.cookies = cookie_jar
 
@@ -385,7 +373,7 @@ def get_ward_list():
         return []
 
     # Save cookies after the request
-    save_cookies(cookie_jar, COOKIE_FILE)
+    save_cookies(cookie_jar)
     
     # Parse the page content and extract the <select> tag with id="ward"
     page_content = response.text
@@ -404,113 +392,216 @@ def get_ward_list():
 
     return ward_list
 
-def scrape_data(start_month=None, end_month=None, selected_wards=None):
-    """
-    Main function to scrape data and return results.
-    Returns both a list of data and CSV formatted data.
-    """
+def scrape_month_ward(month, ward):
+    """Scrape data for a specific month and ward"""
+    results = []
     try:
-        global CSV_MEMORY
-        CSV_MEMORY = StringIO()  # Reset the in-memory CSV
+        csrf_token = get_search_page()
         
-        all_results = []
+        # Get first page
+        first_page_content = get_first_page(csrf_token, month, ward['value'])
+        next_page, records = parse_page(first_page_content)
         
-        # Init CSV header
-        writer = csv.writer(CSV_MEMORY)
-        writer.writerow(["Address", "Name", "Email"])
-        
-        csrf_token = get_search_page()  # Get CSRF token first
-        month_list = get_month_list(start_month, end_month)
-        
-        # Get all wards or filter by selected wards
-        all_wards = get_ward_list()
-        if selected_wards:
-            wards = [ward for ward in all_wards if ward['value'] in selected_wards]
-        else:
-            wards = all_wards
+        # Process first page records
+        for record in records:
+            time.sleep(DELAY)
+            contact_details = get_contact_details(record['keyVal'])
             
-        # Limit the scope to prevent timeouts in serverless functions
-        if len(month_list) > 2:
-            month_list = month_list[:2]
-        if len(wards) > 3:
-            wards = wards[:3]
+            # Only include valid data (not empty and not ending with .gov)
+            if contact_details['email'] and not contact_details['email'].endswith(".gov") and "tree" not in contact_details['email'].lower():
+                results.append({
+                    'address': record['address'],
+                    'name': contact_details['name'], 
+                    'email': contact_details['email']
+                })
+        
+        # Process additional pages if they exist
+        current_page = 1
+        while next_page is not None:
+            current_page += 1
+            next_page_content = get_next_page(next_page)            
+            next_page, records = parse_page(next_page_content)
             
-        for search_month_keyword in month_list:
-            for ward in wards:
-                first_page_content = get_first_page(csrf_token, search_month_keyword, ward['value'])
-                next_page, records = parse_page(first_page_content)
+            for record in records:
+                time.sleep(DELAY)
+                contact_details = get_contact_details(record['keyVal'])
                 
-                # Process first page records
-                for record in records:
-                    time.sleep(DELAY)
-                    contact_details = get_contact_details(record['keyVal'])
-                    
-                    # Only include valid data
-                    if contact_details['email'] and not contact_details['email'].endswith(".gov") and "tree" not in contact_details['email'].lower():
-                        result = {
-                            'address': record['address'],
-                            'name': contact_details['name'],
-                            'email': contact_details['email']
-                        }
-                        all_results.append(result)
-                        save_line(record['address'], contact_details['name'], contact_details['email'])
-
-                # Process additional pages if they exist
-                while next_page is not None:
-                    next_page_content = get_next_page(next_page)            
-                    next_page, records = parse_page(next_page_content)
-                    
-                    for record in records:
-                        time.sleep(DELAY)
-                        contact_details = get_contact_details(record['keyVal'])
-                        
-                        # Only include valid data
-                        if contact_details['email'] and not contact_details['email'].endswith(".gov") and "tree" not in contact_details['email'].lower():
-                            result = {
-                                'address': record['address'],
-                                'name': contact_details['name'],
-                                'email': contact_details['email']
-                            }
-                            all_results.append(result)
-                            save_line(record['address'], contact_details['name'], contact_details['email'])
-        
-        # Get the CSV data as string
-        csv_data = CSV_MEMORY.getvalue()
-        
-        return {
-            'data': all_results,
-            'csv': csv_data,
-            'count': len(all_results),
-            'months': month_list,
-            'wards': [w['name'] for w in wards]
-        }
-                
+                # Only include valid data
+                if contact_details['email'] and not contact_details['email'].endswith(".gov") and "tree" not in contact_details['email'].lower():
+                    results.append({
+                        'address': record['address'],
+                        'name': contact_details['name'], 
+                        'email': contact_details['email']
+                    })
+    
     except Exception as e:
-        print(f"Error in scraping: {e}")
-        return {
-            'error': str(e),
-            'data': [],
-            'csv': '',
-            'count': 0,
-            'months': [],
-            'wards': []
-        }
-
-def main():
-    # This function is kept for backward compatibility
-    # For the API version, use scrape_data() function
-    results = scrape_data()
+        print(f"Error scraping {month} - {ward['name']}: {str(e)}")
     
-    # If you want to save results to a local file when running as a script
-    if results['count'] > 0:
-        with open("cityoflondon_data.csv", "w", newline='', encoding='utf-8') as f:
-            f.write(results['csv'])
-        print(f"Scraping completed successfully with {results['count']} records")
-    else:
-        print("Scraping completed with no results or with errors")
+    return results
 
-if __name__ == "__main__":
-    main()
+def generate_csv(data):
+    """Generate CSV from the data"""
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Address", "Name", "Email"])
+    for item in data:
+        writer.writerow([item['address'], item['name'], item['email']])
+    return output.getvalue()
 
+class handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        """Handle GET requests - serve HTML or provide API information"""
+        if self.path == '/' or self.path == '':
+            # Serve the HTML file
+            try:
+                with open(os.path.join(os.path.dirname(__file__), 'index.html'), 'r') as f:
+                    html_content = f.read()
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'text/html')
+                self.end_headers()
+                self.wfile.write(html_content.encode())
+                return
+            except Exception as e:
+                print(f"Error serving HTML: {e}")
+                # Fall back to API info if HTML fails
+                pass
+        
+        if self.path == '/api' or self.path == '/api/':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            
+            response = {
+                "message": "City of London Planning Scraper API",
+                "endpoints": {
+                    "/": "GET - Web interface",
+                    "/api": "GET - This information",
+                    "/api/wards": "GET - List all wards",
+                    "/api/months": "GET - List available months",
+                    "/api/scrape": "POST - Run scraper with specific parameters"
+                },
+                "usage": "Send a POST request to /api/scrape with start_month, end_month and/or selected_wards parameters"
+            }
+            
+            self.wfile.write(json.dumps(response).encode())
+            return
+        
+        elif self.path == '/api/wards':
+            try:
+                wards = get_ward_list()
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(wards).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                response = {"error": str(e)}
+                self.wfile.write(json.dumps(response).encode())
+                
+        elif self.path == '/api/months':
+            try:
+                # Get available months (past year)
+                now = datetime.now()
+                months = []
+                for i in range(12, -1, -1):  # Past year
+                    date = now.replace(day=1) - timedelta(days=i*30)
+                    months.append(date.strftime("%b %y"))
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(months).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                response = {"error": str(e)}
+                self.wfile.write(json.dumps(response).encode())
+                
+        else:
+            self.send_response(404)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            response = {"error": "Endpoint not found"}
+            self.wfile.write(json.dumps(response).encode())
     
-    
+    def do_POST(self):
+        """Handle POST requests - run the scraper"""
+        if self.path == '/api/scrape':
+            content_length = int(self.headers['Content-Length'])
+            post_data = self.rfile.read(content_length).decode('utf-8')
+            
+            try:
+                data = json.loads(post_data)
+                start_month = data.get('start_month')
+                end_month = data.get('end_month')
+                selected_wards = data.get('selected_wards', [])
+                
+                # Get months to scrape
+                months = get_month_list(start_month, end_month)
+                
+                # Get all wards or use selected ones
+                all_wards = get_ward_list()
+                wards = [ward for ward in all_wards if not selected_wards or ward['value'] in selected_wards]
+                
+                if not wards:
+                    self.send_response(400)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    response = {"error": "No valid wards selected"}
+                    self.wfile.write(json.dumps(response).encode())
+                    return
+                
+                # Use limited number of months and wards for API call to prevent timeouts
+                if len(months) > 2:
+                    months = months[:2]
+                if len(wards) > 3:
+                    wards = wards[:3]
+                
+                # Collect data
+                all_results = []
+                
+                # Sequential processing for API version
+                for month in months:
+                    for ward in wards:
+                        results = scrape_month_ward(month, ward)
+                        all_results.extend(results)
+                
+                # Generate response based on requested format
+                format_type = data.get('format', 'json')
+                
+                if format_type == 'csv':
+                    self.send_response(200)
+                    self.send_header('Content-type', 'text/csv')
+                    self.send_header('Content-Disposition', 'attachment; filename="cityoflondon_data.csv"')
+                    self.end_headers()
+                    csv_data = generate_csv(all_results)
+                    self.wfile.write(csv_data.encode())
+                else:
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    response = {
+                        "data": all_results,
+                        "count": len(all_results),
+                        "months": months,
+                        "wards": [w['name'] for w in wards]
+                    }
+                    self.wfile.write(json.dumps(response).encode())
+                    
+            except Exception as e:
+                self.send_response(500)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                response = {"error": str(e)}
+                self.wfile.write(json.dumps(response).encode())
+                
+        else:
+            self.send_response(404)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            response = {"error": "Endpoint not found"}
+            self.wfile.write(json.dumps(response).encode()) 
